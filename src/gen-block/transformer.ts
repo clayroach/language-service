@@ -1,7 +1,7 @@
 /**
  * Core transformation module for Effect-TS gen block syntax
  *
- * Uses fine-grained MagicString operations to preserve source map positions
+ * Uses fine-grained TextEditor operations to preserve source map positions
  * for expression parts that don't change.
  *
  * Transforms:
@@ -27,17 +27,18 @@
  * - Keep expression parts in place so their positions are preserved in source maps
  */
 
-import MagicString from "magic-string"
+import type { SourceMapData } from "./position-mapper"
 import { findGenBlocks, type GenBlock, hasGenBlocks, transformBlockContent } from "./scanner"
+import { TextEditor } from "./text-editor"
 
 export { findGenBlocks, type GenBlock, hasGenBlocks, transformBlockContent }
 
 export interface TransformResult {
   code: string
-  map: ReturnType<MagicString["generateMap"]> | null
+  map: SourceMapData | null
   hasChanges: boolean
-  /** The MagicString instance for source map generation */
-  magicString: MagicString | null
+  /** The TextEditor instance for source map generation */
+  textEditor: TextEditor | null
 }
 
 /**
@@ -162,7 +163,7 @@ function isPositionInsideNestedFunction(content: string, position: number): bool
 /**
  * Transform source code containing gen blocks
  *
- * Uses fine-grained MagicString operations to preserve source map positions
+ * Uses fine-grained TextEditor operations to preserve source map positions
  * for expressions that don't change.
  */
 export function transformSource(
@@ -170,47 +171,42 @@ export function transformSource(
   filename?: string
 ): TransformResult {
   if (!hasGenBlocks(source)) {
-    return { code: source, map: null, hasChanges: false, magicString: null }
+    return { code: source, map: null, hasChanges: false, textEditor: null }
   }
 
   const blocks = findGenBlocks(source)
   if (blocks.length === 0) {
-    return { code: source, map: null, hasChanges: false, magicString: null }
+    return { code: source, map: null, hasChanges: false, textEditor: null }
   }
 
-  const s = new MagicString(source)
+  const editor = new TextEditor(source)
 
   // Process blocks from end to start to preserve positions
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i]
-    transformBlock(s, source, block)
-  }
-
-  const mapOptions: Parameters<MagicString["generateMap"]>[0] = {
-    includeContent: true,
-    hires: true
-  }
-  if (filename) {
-    mapOptions.source = filename
-    mapOptions.file = `${filename}.map`
+    transformBlock(editor, source, block)
   }
 
   return {
-    code: s.toString(),
-    map: s.generateMap(mapOptions),
+    code: editor.toString(),
+    map: editor.generateMap({
+      includeContent: true,
+      hires: true,
+      ...(filename && { source: filename, file: `${filename}.map` })
+    }),
     hasChanges: true,
-    magicString: s
+    textEditor: editor
   }
 }
 
 /**
  * Transform a single gen block using fine-grained operations
  */
-function transformBlock(s: MagicString, source: string, block: GenBlock): void {
+function transformBlock(editor: TextEditor, source: string, block: GenBlock): void {
   // 1. Replace "gen " (with trailing space) or "gen{" with the wrapper
   //    "Effect.gen(/* __EFFECT_SUGAR__ */ function* () "
   //    The opening brace { stays in place
-  s.overwrite(block.start, block.braceStart, "Effect.gen(/* __EFFECT_SUGAR__ */ function* () ")
+  editor.overwrite(block.start, block.braceStart, "Effect.gen(/* __EFFECT_SUGAR__ */ function* () ")
 
   // 2. Transform bind statements inside the block
   //    Only modify the parts that change, keeping expressions in place
@@ -235,13 +231,13 @@ function transformBlock(s: MagicString, source: string, block: GenBlock): void {
     const absExprStart = contentStart + bind.exprStart
 
     // Insert "const " before variable name
-    s.appendLeft(absVarStart, "const ")
+    editor.appendLeft(absVarStart, "const ")
 
     // Replace from after variable to start of expression with " = yield* "
     // This preserves the variable name and expression in their original positions
-    s.overwrite(absVarEnd, absExprStart, " = yield* ")
+    editor.overwrite(absVarEnd, absExprStart, " = yield* ")
   }
 
   // 3. Add closing paren after the block's closing brace
-  s.appendRight(block.end, ")")
+  editor.appendRight(block.end, ")")
 }

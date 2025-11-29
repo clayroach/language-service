@@ -126,10 +126,10 @@ describe("gen-block scanner", () => {
       expect(result.map?.sources).toContain("test.ts")
     })
 
-    it("preserves MagicString instance for position mapping", () => {
+    it("preserves TextEditor instance for position mapping", () => {
       const source = "const x = gen { return 1 }"
       const result = transformSource(source, "test.ts")
-      expect(result.magicString).not.toBeNull()
+      expect(result.textEditor).not.toBeNull()
     })
   })
 })

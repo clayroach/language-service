@@ -97,7 +97,7 @@ describe("gen-block integration tests", () => {
       const result = transformSource(source, "test.ts")
 
       expect(result.map).not.toBeNull()
-      expect(result.magicString).not.toBeNull()
+      expect(result.textEditor).not.toBeNull()
     })
   })
 })
