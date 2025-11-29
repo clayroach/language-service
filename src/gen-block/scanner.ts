@@ -1,14 +1,12 @@
 /**
- * Token-based scanner for gen {} blocks using js-tokens
+ * Token-based scanner for gen {} blocks
  *
- * Uses the battle-tested js-tokens package to properly handle:
- * - String literals (all types including template literals)
- * - Comments (single-line, multi-line, hashbang)
- * - Regex literals (correctly distinguished from division)
- * - All ECMAScript 2025 syntax
+ * Implements a simple tokenizer that properly handles:
+ * - String literals (single, double, template literals)
+ * - Comments (single-line, multi-line)
+ * - Identifiers and keywords
+ * - Punctuators
  */
-
-import jsTokens, { type Token } from "js-tokens"
 
 export interface GenBlock {
   /** Start position of 'gen' keyword */
@@ -21,28 +19,214 @@ export interface GenBlock {
   braceStart: number
 }
 
-export type TokenWithPosition = Token & {
+/**
+ * Token types we care about
+ */
+type TokenType =
+  | "IdentifierName"
+  | "Punctuator"
+  | "StringLiteral"
+  | "TemplateLiteral"
+  | "SingleLineComment"
+  | "MultiLineComment"
+  | "WhiteSpace"
+  | "LineTerminatorSequence"
+  | "Other"
+
+interface Token {
+  type: TokenType
+  value: string
   start: number
   end: number
 }
 
 /**
- * Tokenize source and add position information
+ * Simple tokenizer for JavaScript/TypeScript
+ * Handles the cases we need for gen block parsing
  */
-export function tokenize(source: string): Array<TokenWithPosition> {
-  const tokens: Array<TokenWithPosition> = []
+function tokenize(source: string): Array<Token> {
+  const tokens: Array<Token> = []
   let pos = 0
 
-  for (const token of jsTokens(source)) {
-    tokens.push({
-      ...token,
-      start: pos,
-      end: pos + token.value.length
-    } as TokenWithPosition)
-    pos += token.value.length
+  while (pos < source.length) {
+    const char = source[pos]
+    const start = pos
+
+    // Whitespace
+    if (char === " " || char === "\t") {
+      while (pos < source.length && (source[pos] === " " || source[pos] === "\t")) {
+        pos++
+      }
+      tokens.push({ type: "WhiteSpace", value: source.slice(start, pos), start, end: pos })
+      continue
+    }
+
+    // Line terminators
+    if (char === "\n" || char === "\r") {
+      if (char === "\r" && source[pos + 1] === "\n") {
+        pos += 2
+      } else {
+        pos++
+      }
+      tokens.push({ type: "LineTerminatorSequence", value: source.slice(start, pos), start, end: pos })
+      continue
+    }
+
+    // Comments
+    if (char === "/") {
+      if (source[pos + 1] === "/") {
+        // Single-line comment
+        pos += 2
+        while (pos < source.length && source[pos] !== "\n" && source[pos] !== "\r") {
+          pos++
+        }
+        tokens.push({ type: "SingleLineComment", value: source.slice(start, pos), start, end: pos })
+        continue
+      }
+      if (source[pos + 1] === "*") {
+        // Multi-line comment
+        pos += 2
+        while (pos < source.length - 1 && !(source[pos] === "*" && source[pos + 1] === "/")) {
+          pos++
+        }
+        pos += 2 // Skip */
+        tokens.push({ type: "MultiLineComment", value: source.slice(start, pos), start, end: pos })
+        continue
+      }
+    }
+
+    // String literals
+    if (char === "\"" || char === "'") {
+      const quote = char
+      pos++
+      while (pos < source.length && source[pos] !== quote) {
+        if (source[pos] === "\\") {
+          pos += 2 // Skip escape sequence
+        } else {
+          pos++
+        }
+      }
+      pos++ // Skip closing quote
+      tokens.push({ type: "StringLiteral", value: source.slice(start, pos), start, end: pos })
+      continue
+    }
+
+    // Template literals
+    if (char === "`") {
+      pos++
+      while (pos < source.length && source[pos] !== "`") {
+        if (source[pos] === "\\") {
+          pos += 2 // Skip escape sequence
+        } else if (source[pos] === "$" && source[pos + 1] === "{") {
+          // Template expression - skip to matching }
+          pos += 2
+          let depth = 1
+          while (pos < source.length && depth > 0) {
+            if (source[pos] === "{") depth++
+            else if (source[pos] === "}") depth--
+            else if (source[pos] === "`") {
+              // Nested template literal - recursively handle
+              pos++
+              while (pos < source.length && source[pos] !== "`") {
+                if (source[pos] === "\\") pos += 2
+                else pos++
+              }
+            } else if (source[pos] === "\"" || source[pos] === "'") {
+              // String in template expression
+              const q = source[pos]
+              pos++
+              while (pos < source.length && source[pos] !== q) {
+                if (source[pos] === "\\") pos += 2
+                else pos++
+              }
+            }
+            pos++
+          }
+        } else {
+          pos++
+        }
+      }
+      pos++ // Skip closing backtick
+      tokens.push({ type: "TemplateLiteral", value: source.slice(start, pos), start, end: pos })
+      continue
+    }
+
+    // Identifiers (including keywords)
+    if (isIdentifierStart(char)) {
+      while (pos < source.length && isIdentifierPart(source[pos])) {
+        pos++
+      }
+      tokens.push({ type: "IdentifierName", value: source.slice(start, pos), start, end: pos })
+      continue
+    }
+
+    // Punctuators and operators
+    if (isPunctuator(char)) {
+      // Handle multi-character operators
+      const twoChar = source.slice(pos, pos + 2)
+      const threeChar = source.slice(pos, pos + 3)
+
+      if (
+        threeChar === "===" || threeChar === "!==" || threeChar === ">>>" ||
+        threeChar === "..." || threeChar === "**="
+      ) {
+        pos += 3
+      } else if (
+        twoChar === "==" || twoChar === "!=" || twoChar === "<=" || twoChar === ">=" ||
+        twoChar === "&&" || twoChar === "||" || twoChar === "++" || twoChar === "--" ||
+        twoChar === "+=" || twoChar === "-=" || twoChar === "*=" || twoChar === "/=" ||
+        twoChar === "=>" || twoChar === "<<" || twoChar === ">>" || twoChar === "??" ||
+        twoChar === "?." || twoChar === "<-"
+      ) {
+        pos += 2
+      } else {
+        pos++
+      }
+      tokens.push({ type: "Punctuator", value: source.slice(start, pos), start, end: pos })
+      continue
+    }
+
+    // Numbers
+    if (isDigit(char) || (char === "." && isDigit(source[pos + 1]))) {
+      while (
+        pos < source.length &&
+        (isDigit(source[pos]) || source[pos] === "." || source[pos] === "e" || source[pos] === "E" ||
+          source[pos] === "_")
+      ) {
+        if ((source[pos] === "e" || source[pos] === "E") && (source[pos + 1] === "+" || source[pos + 1] === "-")) {
+          pos += 2
+        } else {
+          pos++
+        }
+      }
+      // Handle BigInt suffix
+      if (source[pos] === "n") pos++
+      tokens.push({ type: "Other", value: source.slice(start, pos), start, end: pos })
+      continue
+    }
+
+    // Anything else
+    pos++
+    tokens.push({ type: "Other", value: source.slice(start, pos), start, end: pos })
   }
 
   return tokens
+}
+
+function isIdentifierStart(char: string): boolean {
+  return /[a-zA-Z_$]/.test(char)
+}
+
+function isIdentifierPart(char: string): boolean {
+  return /[a-zA-Z0-9_$]/.test(char)
+}
+
+function isDigit(char: string): boolean {
+  return /[0-9]/.test(char)
+}
+
+function isPunctuator(char: string): boolean {
+  return /[{}()[\];:,.<>?!+\-*/%=&|^~@#]/.test(char)
 }
 
 /**
@@ -130,7 +314,7 @@ export function findGenBlocks(source: string): Array<GenBlock> {
  * We want to transform binds inside control flow (if/else/try/catch)
  * but NOT inside nested functions/callbacks (different scope)
  */
-function isInsideNestedFunction(tokens: Array<TokenWithPosition>, upToIndex: number): boolean {
+function isInsideNestedFunction(tokens: Array<Token>, upToIndex: number): boolean {
   // Look for function or arrow function patterns before the current position
   // Track depth to find if we're inside a function body
   let functionDepth = 0

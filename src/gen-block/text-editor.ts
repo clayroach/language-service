@@ -9,10 +9,9 @@
  * - toString(): get the transformed string
  * - generateMap(): generate a source map
  *
- * Uses @jridgewell/gen-mapping for source map generation.
+ * Implements VLQ encoding directly without external dependencies.
  */
 
-import { addMapping, GenMapping, toEncodedMap } from "@jridgewell/gen-mapping"
 import type { SourceMapData } from "./position-mapper"
 
 /**
@@ -43,10 +42,40 @@ export interface GenerateMapOptions {
   hires?: boolean
 }
 
+// Base64 encoding characters for VLQ
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+/**
+ * Encode a single integer as VLQ Base64
+ */
+function encodeVLQ(value: number): string {
+  let result = ""
+  // Convert to sign-magnitude representation
+  let signBit = 0
+  if (value < 0) {
+    signBit = 1
+    value = -value
+  }
+
+  // First 4 bits + sign bit
+  let digit = (value & 0b1111) << 1 | signBit
+  value >>>= 4
+
+  // If there are more bits, set continuation bit
+  while (value > 0) {
+    result += BASE64_CHARS[digit | 0b100000]
+    digit = value & 0b11111
+    value >>>= 5
+  }
+
+  result += BASE64_CHARS[digit]
+  return result
+}
+
 /**
  * Lightweight text editor with source map support
  *
- * Tracks edits and generates source maps using @jridgewell/gen-mapping.
+ * Tracks edits and generates source maps with built-in VLQ encoding.
  */
 export class TextEditor {
   private readonly original: string
@@ -94,31 +123,18 @@ export class TextEditor {
     const { mappings } = this.applyEdits()
     const sourceName = options.source || "source.ts"
 
-    const map = new GenMapping({
-      file: options.file ?? null,
-      sourceRoot: ""
-    })
-
-    // Add mappings from original to generated positions
-    for (const mapping of mappings) {
-      addMapping(map, {
-        source: sourceName,
-        original: { line: mapping.originalLine, column: mapping.originalColumn },
-        generated: { line: mapping.generatedLine, column: mapping.generatedColumn }
-      })
-    }
-
-    const encoded = toEncodedMap(map)
+    // Encode mappings to VLQ format
+    const encodedMappings = this.encodeMappings(mappings)
 
     const result: SourceMapData = {
-      version: encoded.version,
+      version: 3,
       sources: [sourceName],
-      names: [...encoded.names],
-      mappings: encoded.mappings
+      names: [],
+      mappings: encodedMappings
     }
 
-    if (encoded.file) {
-      result.file = encoded.file
+    if (options.file) {
+      result.file = options.file
     }
 
     if (options.includeContent) {
@@ -126,6 +142,74 @@ export class TextEditor {
     }
 
     return result
+  }
+
+  /**
+   * Encode mappings array to VLQ string format
+   */
+  private encodeMappings(mappings: Array<Mapping>): string {
+    // Sort mappings by generated position
+    const sorted = [...mappings].sort((a, b) => {
+      if (a.generatedLine !== b.generatedLine) {
+        return a.generatedLine - b.generatedLine
+      }
+      return a.generatedColumn - b.generatedColumn
+    })
+
+    // Remove duplicates (same generated line/column)
+    const unique: Array<Mapping> = []
+    for (const m of sorted) {
+      const last = unique[unique.length - 1]
+      if (!last || last.generatedLine !== m.generatedLine || last.generatedColumn !== m.generatedColumn) {
+        unique.push(m)
+      }
+    }
+
+    // Group by generated line
+    const lines: Array<Array<Mapping>> = []
+    for (const m of unique) {
+      while (lines.length < m.generatedLine) {
+        lines.push([])
+      }
+      lines[m.generatedLine - 1].push(m)
+    }
+
+    // Encode each line
+    // All values are relative to previous values
+    let prevGenCol = 0
+    let prevOrigLine = 0
+    let prevOrigCol = 0
+    const sourceIndex = 0 // We only have one source
+
+    const encodedLines: Array<string> = []
+
+    for (const line of lines) {
+      const segments: Array<string> = []
+      prevGenCol = 0 // Reset column at start of each line
+
+      for (const m of line) {
+        // Each segment: [genCol, sourceIdx, origLine, origCol]
+        // All values are relative/delta encoded
+        const genColDelta = m.generatedColumn - prevGenCol
+        const origLineDelta = (m.originalLine - 1) - prevOrigLine // Convert to 0-based
+        const origColDelta = m.originalColumn - prevOrigCol
+
+        segments.push(
+          encodeVLQ(genColDelta) +
+            encodeVLQ(sourceIndex) + // Always 0 (relative, so always 0 delta)
+            encodeVLQ(origLineDelta) +
+            encodeVLQ(origColDelta)
+        )
+
+        prevGenCol = m.generatedColumn
+        prevOrigLine = m.originalLine - 1
+        prevOrigCol = m.originalColumn
+      }
+
+      encodedLines.push(segments.join(","))
+    }
+
+    return encodedLines.join(";")
   }
 
   /**
@@ -145,22 +229,17 @@ export class TextEditor {
 
     // Build the result string and track position mappings
     let result = this.original
-    const positionAdjustments: Array<{ pos: number; delta: number }> = []
 
     for (const edit of sortedEdits) {
       switch (edit.type) {
         case "overwrite": {
           const end = edit.end!
-          const oldLen = end - edit.pos
-          const newLen = edit.content.length
           result = result.slice(0, edit.pos) + edit.content + result.slice(end)
-          positionAdjustments.push({ pos: edit.pos, delta: newLen - oldLen })
           break
         }
         case "insertLeft":
         case "insertRight": {
           result = result.slice(0, edit.pos) + edit.content + result.slice(edit.pos)
-          positionAdjustments.push({ pos: edit.pos, delta: edit.content.length })
           break
         }
       }

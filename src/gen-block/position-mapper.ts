@@ -1,18 +1,17 @@
 /**
  * Position mapping utilities for gen-block transformations
  *
- * Uses @jridgewell/trace-mapping for accurate bidirectional position mapping
- * between original source (with gen {}) and transformed source (with Effect.gen()).
+ * Implements bidirectional position mapping between original source (with gen {})
+ * and transformed source (with Effect.gen()) using VLQ-decoded source maps.
  *
  * The source map approach ensures that positions within expressions are
  * accurately mapped, fixing go-to-definition offset issues.
  */
 
-import { generatedPositionFor, originalPositionFor, TraceMap } from "@jridgewell/trace-mapping"
 import type * as ts from "typescript"
 
 /**
- * Source map data structure from MagicString
+ * Source map data structure
  */
 export interface SourceMapData {
   version: number
@@ -23,6 +22,109 @@ export interface SourceMapData {
   mappings: string
 }
 
+/**
+ * Decoded mapping segment
+ */
+interface DecodedMapping {
+  generatedLine: number
+  generatedColumn: number
+  sourceIndex: number
+  originalLine: number
+  originalColumn: number
+  nameIndex?: number
+}
+
+// Base64 decoding table for VLQ
+const BASE64_DECODE: Record<string, number> = {}
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+for (let i = 0; i < BASE64_CHARS.length; i++) {
+  BASE64_DECODE[BASE64_CHARS[i]] = i
+}
+
+/**
+ * Decode a VLQ-encoded string into an array of integers
+ */
+function decodeVLQ(encoded: string): Array<number> {
+  const values: Array<number> = []
+  let shift = 0
+  let value = 0
+
+  for (const char of encoded) {
+    const digit = BASE64_DECODE[char]
+    if (digit === undefined) continue
+
+    const hasContinuation = (digit & 0b100000) !== 0
+    value += (digit & 0b11111) << shift
+
+    if (hasContinuation) {
+      shift += 5
+    } else {
+      // Decode sign from LSB
+      const negative = (value & 1) !== 0
+      value >>>= 1
+      values.push(negative ? -value : value)
+      value = 0
+      shift = 0
+    }
+  }
+
+  return values
+}
+
+/**
+ * Decode source map mappings string into structured data
+ */
+function decodeMappings(mappings: string): Array<DecodedMapping> {
+  const decoded: Array<DecodedMapping> = []
+  const lines = mappings.split(";")
+
+  let prevSourceIndex = 0
+  let prevOrigLine = 0
+  let prevOrigCol = 0
+  let prevNameIndex = 0
+
+  for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+    const line = lines[lineNum]
+    if (!line) continue
+
+    const segments = line.split(",")
+    let genCol = 0
+
+    for (const segment of segments) {
+      if (!segment) continue
+
+      const values = decodeVLQ(segment)
+      if (values.length === 0) continue
+
+      // Values are delta-encoded
+      genCol += values[0]
+
+      if (values.length >= 4) {
+        prevSourceIndex += values[1]
+        prevOrigLine += values[2]
+        prevOrigCol += values[3]
+
+        const mapping: DecodedMapping = {
+          generatedLine: lineNum + 1, // 1-based
+          generatedColumn: genCol,
+          sourceIndex: prevSourceIndex,
+          originalLine: prevOrigLine + 1, // Convert to 1-based
+          originalColumn: prevOrigCol
+        }
+
+        if (values.length >= 5) {
+          prevNameIndex += values[4]
+          mapping.nameIndex = prevNameIndex
+        }
+
+        decoded.push(mapping)
+      }
+    }
+  }
+
+  return decoded
+}
+
 export interface TransformCacheEntry {
   /** Original source code (with gen {} syntax) */
   originalSource: string
@@ -30,8 +132,8 @@ export interface TransformCacheEntry {
   transformedSource: string
   /** Source map for position mapping */
   sourceMap: SourceMapData
-  /** TraceMap instance for efficient lookups */
-  tracer: TraceMap
+  /** Decoded mappings for efficient lookups */
+  decodedMappings: Array<DecodedMapping>
   /** Filename for the source */
   filename: string
 }
@@ -39,22 +141,20 @@ export interface TransformCacheEntry {
 /**
  * Position mapper using source maps
  *
- * Provides accurate bidirectional position mapping using @jridgewell/trace-mapping.
+ * Provides accurate bidirectional position mapping using decoded source maps.
  */
 export class PositionMapper {
-  private readonly tracer: TraceMap
-  private readonly filename: string
+  private readonly decodedMappings: Array<DecodedMapping>
   private readonly originalSource: string
   private readonly transformedSource: string
 
   constructor(
     sourceMap: SourceMapData,
-    filename: string,
+    _filename: string,
     originalSource: string,
     transformedSource: string
   ) {
-    this.tracer = new TraceMap(sourceMap as any)
-    this.filename = filename
+    this.decodedMappings = decodeMappings(sourceMap.mappings)
     this.originalSource = originalSource
     this.transformedSource = transformedSource
   }
@@ -83,23 +183,81 @@ export class PositionMapper {
   }
 
   /**
+   * Find the best mapping for a generated position (binary search)
+   */
+  private findMappingForGenerated(line: number, column: number): DecodedMapping | null {
+    // Filter mappings for this generated line
+    const lineMappings = this.decodedMappings.filter((m) => m.generatedLine === line)
+    if (lineMappings.length === 0) {
+      // Try to find any mapping on previous lines
+      for (let l = line - 1; l >= 1; l--) {
+        const prevLineMappings = this.decodedMappings.filter((m) => m.generatedLine === l)
+        if (prevLineMappings.length > 0) {
+          return prevLineMappings[prevLineMappings.length - 1]
+        }
+      }
+      return null
+    }
+
+    // Find the mapping with the largest column <= target column
+    let best: DecodedMapping | null = null
+    for (const m of lineMappings) {
+      if (m.generatedColumn <= column) {
+        if (!best || m.generatedColumn > best.generatedColumn) {
+          best = m
+        }
+      }
+    }
+
+    return best || lineMappings[0]
+  }
+
+  /**
+   * Find the best mapping for an original position
+   */
+  private findMappingForOriginal(line: number, column: number): DecodedMapping | null {
+    // Find mappings for this original line
+    const lineMappings = this.decodedMappings.filter((m) => m.originalLine === line)
+    if (lineMappings.length === 0) {
+      // Try to find any mapping on previous lines
+      for (let l = line - 1; l >= 1; l--) {
+        const prevLineMappings = this.decodedMappings.filter((m) => m.originalLine === l)
+        if (prevLineMappings.length > 0) {
+          return prevLineMappings[prevLineMappings.length - 1]
+        }
+      }
+      return null
+    }
+
+    // Find the mapping with the largest column <= target column
+    let best: DecodedMapping | null = null
+    for (const m of lineMappings) {
+      if (m.originalColumn <= column) {
+        if (!best || m.originalColumn > best.originalColumn) {
+          best = m
+        }
+      }
+    }
+
+    return best || lineMappings[0]
+  }
+
+  /**
    * Map a position from original source to transformed source
    */
   originalToTransformed(pos: number): number {
     const { column, line } = this.positionToLineColumn(this.originalSource, pos)
+    const mapping = this.findMappingForOriginal(line, column)
 
-    const generated = generatedPositionFor(this.tracer, {
-      source: this.filename,
-      line,
-      column
-    })
-
-    if (generated.line === null || generated.column === null) {
-      // Fallback: return the position as-is if no mapping found
+    if (!mapping) {
       return pos
     }
 
-    return this.lineColumnToPosition(this.transformedSource, generated.line, generated.column)
+    // Calculate offset from the mapping point
+    const columnOffset = column - mapping.originalColumn
+    const targetColumn = mapping.generatedColumn + columnOffset
+
+    return this.lineColumnToPosition(this.transformedSource, mapping.generatedLine, Math.max(0, targetColumn))
   }
 
   /**
@@ -107,15 +265,17 @@ export class PositionMapper {
    */
   transformedToOriginal(pos: number): number {
     const { column, line } = this.positionToLineColumn(this.transformedSource, pos)
+    const mapping = this.findMappingForGenerated(line, column)
 
-    const original = originalPositionFor(this.tracer, { line, column })
-
-    if (original.line === null || original.column === null) {
-      // Fallback: return the position as-is if no mapping found
+    if (!mapping) {
       return pos
     }
 
-    return this.lineColumnToPosition(this.originalSource, original.line, original.column)
+    // Calculate offset from the mapping point
+    const columnOffset = column - mapping.generatedColumn
+    const targetColumn = mapping.originalColumn + columnOffset
+
+    return this.lineColumnToPosition(this.originalSource, mapping.originalLine, Math.max(0, targetColumn))
   }
 
   /**
@@ -144,7 +304,7 @@ const transformCache = new Map<string, TransformCacheEntry>()
  * @param fileName - The file name
  * @param originalSource - Original source code
  * @param transformedSource - Transformed source code
- * @param sourceMap - Source map from MagicString
+ * @param sourceMap - Source map
  */
 export function cacheTransformation(
   fileName: string,
@@ -152,13 +312,13 @@ export function cacheTransformation(
   transformedSource: string,
   sourceMap: SourceMapData
 ): PositionMapper {
-  const tracer = new TraceMap(sourceMap as any)
+  const decodedMappings = decodeMappings(sourceMap.mappings)
 
   transformCache.set(fileName, {
     originalSource,
     transformedSource,
     sourceMap,
-    tracer,
+    decodedMappings,
     filename: sourceMap.sources[0] || fileName
   })
 

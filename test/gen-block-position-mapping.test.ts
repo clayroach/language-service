@@ -1,6 +1,10 @@
-import { originalPositionFor, TraceMap } from "@jridgewell/trace-mapping"
 import { describe, expect, it } from "vitest"
-import { cacheTransformation, getPositionMapper, type SourceMapData } from "../src/gen-block/position-mapper"
+import {
+  cacheTransformation,
+  getPositionMapper,
+  PositionMapper,
+  type SourceMapData
+} from "../src/gen-block/position-mapper"
 import { findGenBlocks, transformSource } from "../src/gen-block/transformer"
 
 describe("gen-block position mapping", () => {
@@ -112,18 +116,23 @@ describe("gen-block position mapping", () => {
     expect(map.sources).toContain("test.ts")
     expect(map.mappings).toBeTruthy()
 
-    // Use trace-mapping to verify mappings work
-    const tracer = new TraceMap(map as any)
+    // Use our PositionMapper to verify mappings work
+    const mapper = new PositionMapper(map, "test.ts", original, result.code)
 
     // Find "getUser" in transformed code
     const transformedLines = result.code.split("\n")
     const getUserCol = transformedLines[1].indexOf("getUser")
 
+    // Get position of start of line 2 + column
+    const line2Start = transformedLines[0].length + 1 // +1 for newline
+    const transformedGetUserPos = line2Start + getUserCol
+
     // Trace back to original
-    const traced = originalPositionFor(tracer, { line: 2, column: getUserCol })
+    const tracedPos = mapper.transformedToOriginal(transformedGetUserPos)
+    const tracedLineNum = original.slice(0, tracedPos).split("\n").length
 
     // Should map back to line 2 of original
-    expect(traced.line).toBe(2)
+    expect(tracedLineNum).toBe(2)
   })
 
   it("maps positions in expression with 1:1 precision", () => {
