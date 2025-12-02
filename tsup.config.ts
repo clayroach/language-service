@@ -8,6 +8,8 @@ import { defineConfig } from "tsup"
 
 export default defineConfig({
   entry: ["src/index.ts", "src/transform.ts", "src/cli.ts", "src/effect-lsp-patch-utils.ts"],
+  format: ["cjs"],
+  outExtension: () => ({ js: ".cjs" }),
   clean: true,
   sourcemap: true,
   noExternal: ["effect"],
@@ -33,7 +35,7 @@ export default defineConfig({
         description: json.description,
         main: "index.cjs",
         bin: {
-          "effect-language-service": "cli.js"
+          "effect-language-service": "cli.cjs"
         },
         repository: json.repository,
         author: json.author,

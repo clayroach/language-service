@@ -1,0 +1,51 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Plugin",
+      "type": "shell",
+      "command": "pnpm build",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Setup Examples Folder",
+      "type": "shell",
+      "command": "cd examples/gen-block && pnpm install",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Launch Debug with Gen-Block Examples",
+      "type": "shell",
+      "command": "TSS_DEBUG=5667 code --user-data-dir ~/.vscode-debug/ ${workspaceFolder}/examples/gen-block",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Prepare Debug Environment",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Build Plugin",
+        "Setup Examples Folder",
+        "Launch Debug with Gen-Block Examples"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

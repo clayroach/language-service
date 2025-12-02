@@ -2,12 +2,27 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Attach to TS Server",
+            "name": "Debug Gen-Block Examples",
             "type": "node",
             "request": "attach",
             "protocol": "inspector",
             "port": 5667,
             "sourceMaps": true,
+            "preLaunchTask": "Prepare Debug Environment",
+            // This will:
+            // 1. Build the plugin (pnpm build)
+            // 2. Setup examples folder (install deps)
+            // 3. Launch VSCode with gen-block examples folder
+            // 4. Attach debugger to the TypeScript server
+            //
+            // Just click the debug button (F5) and wait for the new VSCode window!
+            // Set breakpoints in plugin source (e.g., src/gen-block/host-wrapper.ts)
+            //
+            // Note: Gen-blocks work without patching TypeScript - patching is only
+            // needed for advanced Effect diagnostics features.
+            //
+            // After changes: Stop debug (Shift+F5), then F5 to rebuild and relaunch
+            // Or in debug window: Cmd+Shift+P > "TypeScript: Restart TS Server"
         }
     ]
 }

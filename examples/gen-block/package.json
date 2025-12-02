@@ -1,0 +1,11 @@
+{
+  "name": "gen-block-examples",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "effect": "^3.19.0",
+    "@effect/language-service": "file:../../dist",
+    "typescript": "^5.9.3"
+  }
+}
