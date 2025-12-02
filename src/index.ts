@@ -629,6 +629,93 @@ const init = (
       return applicableRenameInfo
     }
 
+    proxy.getEncodedSemanticClassifications = (fileName, span, format, ...args) => {
+      // Map span for gen-block files (original → transformed)
+      let mappedSpan = span
+      const isGenBlock = genBlockHostResult?.isTransformed(fileName)
+
+      if (isGenBlock) {
+        mappedSpan = genBlockHostResult!.mapSpanToOriginal(fileName, span)
+        // Map to transformed coordinates for TypeScript
+        const transformedStart = genBlockHostResult!.mapToTransformed(fileName, mappedSpan.start)
+        const transformedEnd = genBlockHostResult!.mapToTransformed(fileName, mappedSpan.start + mappedSpan.length)
+        mappedSpan = {
+          start: transformedStart,
+          length: transformedEnd - transformedStart
+        }
+      }
+
+      const classifications = languageService.getEncodedSemanticClassifications(fileName, mappedSpan, format, ...args)
+
+      // Map classification spans back to original coordinates
+      if (isGenBlock && classifications.spans) {
+        const mappedSpans: Array<number> = []
+        // Encoded format: [start, length, classification] triplets
+        for (let i = 0; i < classifications.spans.length; i += 3) {
+          const start = classifications.spans[i]
+          const length = classifications.spans[i + 1]
+          const classification = classifications.spans[i + 2]
+
+          // Map the span back to original coordinates
+          const originalStart = genBlockHostResult!.mapToOriginal(fileName, start)
+          const originalEnd = genBlockHostResult!.mapToOriginal(fileName, start + length)
+
+          mappedSpans.push(originalStart, originalEnd - originalStart, classification)
+        }
+
+        return {
+          ...classifications,
+          spans: mappedSpans
+        }
+      }
+
+      return classifications
+    }
+
+    proxy.getSemanticClassifications = (
+      fileName: string,
+      span: ts.TextSpan,
+      format?: ts.SemanticClassificationFormat
+    ) => {
+      // Map span for gen-block files (original → transformed)
+      let mappedSpan = span
+      const isGenBlock = genBlockHostResult?.isTransformed(fileName)
+
+      if (isGenBlock) {
+        const transformedStart = genBlockHostResult!.mapToTransformed(fileName, span.start)
+        const transformedEnd = genBlockHostResult!.mapToTransformed(fileName, span.start + span.length)
+        mappedSpan = {
+          start: transformedStart,
+          length: transformedEnd - transformedStart
+        }
+      }
+
+      const classifications = format !== undefined
+        ? languageService.getSemanticClassifications(fileName, mappedSpan, format)
+        : languageService.getSemanticClassifications(fileName, mappedSpan)
+
+      // Map classification spans back to original coordinates
+      if (isGenBlock && Array.isArray(classifications)) {
+        return classifications.map((classification: any) => {
+          const originalStart = genBlockHostResult!.mapToOriginal(fileName, classification.textSpan.start)
+          const originalEnd = genBlockHostResult!.mapToOriginal(
+            fileName,
+            classification.textSpan.start + classification.textSpan.length
+          )
+
+          return {
+            ...classification,
+            textSpan: {
+              start: originalStart,
+              length: originalEnd - originalStart
+            }
+          }
+        }) as any
+      }
+
+      return classifications as any
+    }
+
     const additionalProtocolHandlers: Record<
       string,
       (request: ts.server.protocol.Request) => ts.server.HandlerResponse
